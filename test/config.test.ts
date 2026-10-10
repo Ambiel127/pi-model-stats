@@ -11,4 +11,14 @@ describe("configuration-free storage paths", () => {
 		expect(ERROR_LOG_PATH.replace(/\\/g, "/")).toBe("C:/model-stats-test-agent/model-stats/error.log");
 		expect(LOCK_PATH.replace(/\\/g, "/")).toBe("C:/model-stats-test-agent/model-stats/.lock");
 	});
+
+	it("uses a dedicated stats directory when configured", async () => {
+		vi.stubEnv("PI_MODEL_STATS_DIR", "C:/model-stats-project/.pi/agent/model-stats");
+		vi.resetModules();
+		const config = await import("../src/config.js");
+
+		expect(config.STATS_DIR.replace(/\\/g, "/")).toBe("C:/model-stats-project/.pi/agent/model-stats");
+		expect(config.DATA_PATH.replace(/\\/g, "/")).toBe("C:/model-stats-project/.pi/agent/model-stats/data.json");
+		vi.unstubAllEnvs();
+	});
 });
