@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 vi.mock("@earendil-works/pi-coding-agent", () => ({ getAgentDir: () => "./test/.test-agent" }));
 
 import { DATA_PATH, ERROR_LOG_PATH, LOCK_PATH, STATS_DIR } from "../src/config.js";
+import { dayKey } from "../src/metrics.js";
 import { StatsStore } from "../src/storage.js";
 import type { ModelLike } from "../src/types.js";
 
@@ -16,7 +17,9 @@ async function waitForFile(path: string): Promise<void> {
 	throw new Error(`timed out waiting for ${path}`);
 }
 
-async function waitForObservationCount(count: number, timeoutMs = 2_000): Promise<any> {
+// 默认 10s：一次 record() 是「排队 → 加锁 → 读 → 原子写 → 10ms 睡眠」，
+// 多个测试并行时 20 次串行落盘可能超过 2s，导致间歇性 timed out waiting。
+async function waitForObservationCount(count: number, timeoutMs = 10_000): Promise<any> {
 	for (let i = 0; i < timeoutMs / 10; i++) {
 		try {
 			const value = JSON.parse(await readFile(DATA_PATH, "utf8"));
@@ -94,7 +97,8 @@ describe("storage runtime boundary", () => {
 	});
 
 	it("migrates v2 and v3 daily raw samples into digests", async () => {
-		const day = new Date().toISOString().slice(0, 10);
+		// 必须用本地日历日：夹具键若按 UTC 生成，在负偏移时区会落到 today 之后而被当作未来数据排除。
+		const day = dayKey(Date.now());
 		for (const version of [2, 3]) {
 			await writeFile(DATA_PATH, JSON.stringify({ schemaVersion: version, buckets: { legacy: { identity: { provider: model.provider, modelId: model.id, configFingerprint: "legacy" }, recent: { lastResults: "s", consecutiveFailures: 0 }, days: { [day]: { total: 2, byResult: { success: 2 }, firstByteMs: [100, 200], ...(version === 3 ? { outputTokens: 10, generationMs: 1000 } : {}) } } } } }));
 			const store = await StatsStore.create();
@@ -109,7 +113,7 @@ describe("storage runtime boundary", () => {
 	});
 
 	it("rejects persisted daily totals that disagree with result counts", async () => {
-		const day = new Date().toISOString().slice(0, 10);
+		const day = dayKey(Date.now());
 		await writeFile(DATA_PATH, JSON.stringify({ schemaVersion: 4, buckets: { broken: { identity: { provider: model.provider, modelId: model.id, configFingerprint: "x" }, recent: { lastResults: "", consecutiveFailures: 0 }, days: { [day]: { total: 9, byResult: { success: 1 }, firstByteDigest: { count: 0, centroids: [] } } } } } }));
 		const store = await StatsStore.create();
 		expect(store.getSummary(model).weekAttempts).toBe(0);
@@ -124,7 +128,9 @@ describe("storage runtime boundary", () => {
 		await resetStorage();
 		const store = await StatsStore.create();
 		store.record(model, { timestamp: Date.now(), result: "success" });
-		await new Promise((resolve) => setTimeout(resolve, 30));
+		// 必须等写队列真正落盘：固定睡眠超时时 buckets 仍为 {}，
+		// 下面的 corrupt 函数会拿到 undefined 并被 JSON.stringify 静默丢弃，造成假阴性。
+		await waitForObservationCount(1);
 		const data = JSON.parse(await readFile(DATA_PATH, "utf8"));
 		corrupt(data);
 		await writeFile(DATA_PATH, JSON.stringify(data));
@@ -143,6 +149,34 @@ describe("storage runtime boundary", () => {
 	it("keeps only the five newest corrupt data backups", async () => {
 		for (let i = 0; i < 7; i++) { await writeFile(DATA_PATH, JSON.stringify({ schemaVersion: 999 })); await StatsStore.create(); }
 		expect((await readdir(STATS_DIR)).filter((file) => /^data\.json\.corrupt-\d+$/.test(file))).toHaveLength(5);
+	});
+
+	it("prunes daily buckets older than the 30-day local retention window", async () => {
+		await resetStorage();
+		const store = await StatsStore.create();
+		store.record(model, { timestamp: Date.now(), result: "success" });
+		await waitForObservationCount(1);
+
+		// 以本地日历日构造跨越保留边界的数据：today 与 today-29 应保留（共 30 天），today-30 与 today-45 应淘汰。
+		const localDay = (offset: number): string => { const date = new Date(); date.setDate(date.getDate() - offset); return dayKey(date.getTime()); };
+		const data = JSON.parse(await readFile(DATA_PATH, "utf8"));
+		const bucket = Object.values(data.buckets)[0] as any;
+		for (const offset of [0, 29, 30, 45]) bucket.days[localDay(offset)] = { total: 1, byResult: { success: 1 }, firstByteDigest: { count: 0, centroids: [] } };
+		await writeFile(DATA_PATH, JSON.stringify(data));
+
+		store.record(model, { timestamp: Date.now(), result: "success" });
+		// 轮询到过期键消失为止，不用固定睡眠：record() 内部是排队异步写，裁剪完成时机不确定。
+		let keys: string[] = [];
+		for (let i = 0; i < 200; i++) {
+			keys = Object.keys((Object.values(JSON.parse(await readFile(DATA_PATH, "utf8")).buckets)[0] as any).days);
+			if (!keys.includes(localDay(45))) break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+
+		expect(keys).toContain(localDay(0));
+		expect(keys).toContain(localDay(29));
+		expect(keys).not.toContain(localDay(30));
+		expect(keys).not.toContain(localDay(45));
 	});
 
 	it("does not lose observations from concurrent store instances", async () => {

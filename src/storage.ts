@@ -165,8 +165,9 @@ async function readData(): Promise<StatsData> {
 }
 
 function pruneDays(bucket: StatsBucket, now: number): void {
-	const cutoff = new Date(`${dayKey(now)}T00:00:00.000Z`);
-	cutoff.setUTCDate(cutoff.getUTCDate() - (RETENTION_DAYS - 1));
+	// 同 dayKey：本地日历语义 + setDate，避开 UTC 与 DST 陷阱。
+	const cutoff = new Date(now);
+	cutoff.setDate(cutoff.getDate() - (RETENTION_DAYS - 1));
 	const minKey = dayKey(cutoff.getTime());
 	for (const key of Object.keys(bucket.days)) if (key < minKey) delete bucket.days[key];
 }

@@ -29,9 +29,10 @@ export function classifyError(status?: number, errorMessage?: unknown): ResultCa
 	return "unknown";
 }
 
+/** 本地时区日历日。不用 UTC：否则 UTC+8 用户每天 00:00-07:59 看到的“今日”其实是昨天。 */
 export function dayKey(timestamp: number): string {
 	const date = new Date(timestamp);
-	return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+	return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 export function isProviderFailure(result: ResultCategory): boolean {
@@ -40,14 +41,16 @@ export function isProviderFailure(result: ResultCategory): boolean {
 
 export function summarizeDays(days: Record<string, { total: number; byResult: Partial<Record<ResultCategory, number>>; firstByteDigest: Digest; outputTokens?: number; generationMs?: number }>, now = Date.now()): StatsSummary {
 	const today = dayKey(now);
-	const weekStart = new Date(`${today}T00:00:00.000Z`);
-	weekStart.setUTCDate(weekStart.getUTCDate() - 6);
+	// setDate 是本地日历语义，能正确处理 DST 切换日；不能用 now - 6 * 86_400_000（那天只有 23/25 小时）。
+	const weekStart = new Date(now);
+	weekStart.setDate(weekStart.getDate() - 6);
+	const weekStartKey = dayKey(weekStart.getTime());
 	let todaySuccesses = 0, todayAttempts = 0, weekSuccesses = 0, weekAttempts = 0;
 	const latencyDigests: Digest[] = [];
 	let weekOutputTokens = 0, weekGenerationMs = 0;
 	for (const [key, stats] of Object.entries(days)) {
-		const date = new Date(`${key}T00:00:00.000Z`);
-		if (key > today || date < weekStart) continue;
+		// YYYY-MM-DD 字典序 == 时间序，直接比字符串，避开 Date 解析的时区陷阱。
+		if (key > today || key < weekStartKey) continue;
 		const successes = stats.byResult.success ?? 0;
 		const failureCount = Object.entries(stats.byResult).reduce((sum, [result, count]) => sum + (result !== "success" && result !== "request_rejected" && result !== "cancelled" ? count ?? 0 : 0), 0);
 		const attempts = successes + failureCount;

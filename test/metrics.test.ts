@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyError, formatAvailability, formatFirstByte, formatStatsFields, resultFromStopReason, summarizeObservations } from "../src/metrics.js";
+import { classifyError, dayKey, formatAvailability, formatFirstByte, formatStatsFields, resultFromStopReason, summarizeDays, summarizeObservations } from "../src/metrics.js";
 
 describe("metrics", () => {
 	it("maps stop reasons and summarizes daily observations", () => {
@@ -26,14 +26,36 @@ describe("metrics", () => {
 		expect(formatAvailability(0, 0)).toBe("—");
 	});
 
-	it("uses a UTC calendar window across year boundaries and excludes future days", () => {
-		const now = Date.UTC(2025, 0, 2, 12);
+	it("keys days by local calendar date, not UTC", () => {
+		expect(dayKey(new Date(2025, 0, 2, 0, 0).getTime())).toBe("2025-01-02");
+		expect(dayKey(new Date(2025, 0, 2, 23, 59).getTime())).toBe("2025-01-02");
+		expect(dayKey(new Date(2025, 0, 3, 0, 0).getTime())).toBe("2025-01-03");
+		// 本地午夜前后必须跳日：旧的 UTC 实现在正偏移时区会把 00:00-07:59 归到前一天，两边相等。
+		expect(dayKey(new Date(2025, 0, 2, 0, 30).getTime())).not.toBe(dayKey(new Date(2025, 0, 1, 23, 30).getTime()));
+	});
+
+	it("spans exactly seven local calendar days including today", () => {
+		const now = new Date(2025, 2, 10, 12).getTime();
+		const days: Record<string, { total: number; byResult: { success: number }; firstByteDigest: { count: number; centroids: [] } }> = {};
+		for (let offset = 0; offset < 8; offset++) {
+			days[dayKey(new Date(2025, 2, 10 - offset, 12).getTime())] = { total: 1, byResult: { success: 1 }, firstByteDigest: { count: 0, centroids: [] } };
+		}
+		// 8 个连续本地日历日（跨越 3 月 9 日 DST 切换），只算含今日在内的最近 7 天。
+		const summary = summarizeDays(days, now);
+		expect(summary.weekSuccesses).toBe(7);
+		expect(summary.weekAttempts).toBe(7);
+		expect(summary.todaySuccesses).toBe(1);
+	});
+
+	it("uses a local calendar window across year boundaries and excludes future days", () => {
+		// 均用本地时间构造，使断言不依赖运行机器的时区。
+		const now = new Date(2025, 0, 2, 12).getTime();
 		const summary = summarizeObservations([
-			{ timestamp: Date.UTC(2025, 0, 2), result: "success" },
-			{ timestamp: Date.UTC(2025, 0, 1), result: "server_error" },
-			{ timestamp: Date.UTC(2024, 11, 27), result: "success" },
-			{ timestamp: Date.UTC(2024, 11, 26), result: "success" },
-			{ timestamp: Date.UTC(2025, 0, 3), result: "success" },
+			{ timestamp: new Date(2025, 0, 2, 1).getTime(), result: "success" },
+			{ timestamp: new Date(2025, 0, 1, 23).getTime(), result: "server_error" },
+			{ timestamp: new Date(2024, 11, 27, 0).getTime(), result: "success" },
+			{ timestamp: new Date(2024, 11, 26, 23).getTime(), result: "success" },
+			{ timestamp: new Date(2025, 0, 3, 0).getTime(), result: "success" },
 		], now);
 		expect(summary.todaySuccesses).toBe(1);
 		expect(summary.todayAttempts).toBe(1);
