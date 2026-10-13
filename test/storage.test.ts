@@ -19,16 +19,23 @@ async function waitForFile(path: string): Promise<void> {
 
 // 默认 10s：一次 record() 是「排队 → 加锁 → 读 → 原子写 → 10ms 睡眠」，
 // 多个测试并行时 20 次串行落盘可能超过 2s，导致间歇性 timed out waiting。
+// 用墙钟截止时间而非迭代次数：并行满载时每次 readFile 自身要 5-20ms，
+// 按「次数 × 10ms」估算会让实际等待远超 timeoutMs，被 vitest 的测试超时抢先，
+// 报成 "Test timed out" 而丢掉真正的原因。失败时带上最后观测到的数量以便定位。
 async function waitForObservationCount(count: number, timeoutMs = 10_000): Promise<any> {
-	for (let i = 0; i < timeoutMs / 10; i++) {
+	const deadline = Date.now() + timeoutMs;
+	let last = 0;
+	for (;;) {
 		try {
 			const value = JSON.parse(await readFile(DATA_PATH, "utf8"));
 			const bucket = Object.values(value.buckets)[0] as { days: Record<string, { total: number }> } | undefined;
-			if (bucket && Object.values(bucket.days).reduce((sum, day) => sum + day.total, 0) >= count) return value;
+			last = bucket ? Object.values(bucket.days).reduce((sum, day) => sum + day.total, 0) : 0;
+			if (last >= count) return value;
 		} catch { /* Wait for queued writes. */ }
+		if (Date.now() >= deadline) break;
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
-	throw new Error(`timed out waiting for ${count} observations`);
+	throw new Error(`timed out waiting for ${count} observations, last seen ${last}`);
 }
 
 const STORAGE_TEST_DIR = "./test/.test-agent/model-stats";
