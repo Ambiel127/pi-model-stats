@@ -1,0 +1,8 @@
+# 统一行尾。attributes 优先级高于各机器的 core.autocrlf / core.eol，
+# 因此 Linux / macOS / Windows 检出结果一致：仓库与工作区都是 LF。
+# text=auto 而非 text，让 git 自行识别二进制文件，不做转换。
+* text=auto eol=lf
+
+# dev.cmd 由 cmd.exe 解析，LF 结尾会导致 goto / 标签解析异常。
+# 仓库内仍存 LF，仅在 Windows 工作区检出为 CRLF。
+*.cmd text eol=crlf
