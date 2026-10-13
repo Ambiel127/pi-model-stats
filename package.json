@@ -1,6 +1,6 @@
 {
   "name": "pi-model-stats",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Passive model performance statistics and a stats-enhanced model picker for Pi",
   "license": "MIT",
   "repository": {
@@ -11,9 +11,19 @@
   "bugs": {
     "url": "https://github.com/Ambiel127/pi-model-stats/issues"
   },
-  "keywords": ["pi-package", "pi", "extension", "model-stats", "latency"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "model-stats",
+    "latency"
+  ],
   "type": "module",
-  "files": ["src", "README.md", "LICENSE"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "check": "tsc --noEmit",
     "lint": "eslint .",
