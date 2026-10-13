@@ -11,6 +11,8 @@ const MAX_LOG_BYTES = 1_000_000;
 const RETENTION_DAYS = 30;
 const RECENT_RESULTS = 20;
 const MAX_CORRUPT_BACKUPS = 5;
+const RENAME_ATTEMPTS = 6;
+const RENAME_BACKOFF_MS = 10;
 const RESULT_CATEGORIES = new Set<ResultCategory>(["success", "network", "timeout", "rate_limit", "server_error", "authentication", "permission", "model_not_found", "stream_error", "malformed_response", "request_rejected", "cancelled", "unknown"]);
 
 async function pruneCorruptBackups(): Promise<void> {
@@ -32,7 +34,19 @@ async function writeAtomic(path: string, text: string | Uint8Array): Promise<voi
 	await mkdir(STATS_DIR, { recursive: true });
 	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	await writeFile(temporary, text);
-	await rename(temporary, path);
+	// Windows 上 rename 覆盖被其他 handle（并发读取方、杀软、索引服务）占用的目标会瞬时
+	// EPERM/EBUSY/EACCES；这是可恢复的，必须重试——否则整条观测被 record() 静默丢弃。
+	for (let attempt = 1; ; attempt++) {
+		try { await rename(temporary, path); return; }
+		catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (attempt >= RENAME_ATTEMPTS || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) {
+				await rm(temporary, { force: true }).catch(() => undefined);
+				throw error;
+			}
+			await new Promise((resolve) => setTimeout(resolve, RENAME_BACKOFF_MS * attempt));
+		}
+	}
 }
 
 async function withFileLock<T>(operation: () => Promise<T>): Promise<T> {
