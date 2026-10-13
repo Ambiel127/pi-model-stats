@@ -1,0 +1,57 @@
+name: Release
+
+# 只在推送 v* tag 时触发，普通 push 不触发。
+# 本地用 `npm run release:minor`（或 patch/major）一条命令完成校验、bump、提交、打 tag、推送。
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # 创建 GitHub Release
+  id-token: write # npm trusted publishing (OIDC) 与 --provenance 签名
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # generate_release_notes 需要完整历史才能定位上一个 tag
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Node 22 自带 npm 10.x，而 trusted publishing 需要 npm >= 11.5.1
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+
+      - run: npm ci
+
+      - run: npm run validate
+
+      # 最关键的一道闸：tag 与 package.json 版本不一致就立刻失败，
+      # 避免把 0.2.0 的代码以 0.1.0 的名义发出去。
+      - name: Guard tag against package.json version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      # --provenance 生成签名构建凭据，把 npm 上的 tarball 绑回这个 commit 与工作流
+      - name: Publish to npm
+        run: npm publish --provenance
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 用预装的 gh CLI 而非第三方 action：少一个供应链依赖，且它只拿到本仓库的
+        # 短期 GITHUB_TOKEN。--generate-notes 依据上一个 tag 以来的提交自动生成说明。
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
