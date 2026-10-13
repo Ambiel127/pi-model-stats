@@ -79,12 +79,24 @@ export function summarizeObservations(observations: Observation[], now = Date.no
 }
 
 export function formatFirstByte(value: number | undefined): string {
-	if (value === undefined) return "首字 —";
-	if (value < 1000) return `首字 ${Math.round(value)}ms`;
+	if (value === undefined) return "—";
+	if (value < 1000) return `${Math.round(value)}ms`;
 	const seconds = value / 1000;
-	return `首字 ${seconds.toFixed(seconds >= 10 ? 0 : 1).replace(/\.0$/, "")}s`;
+	return `${seconds.toFixed(seconds >= 10 ? 0 : 1).replace(/\.0$/, "")}s`;
 }
 
 export function formatAvailability(successes: number, attempts: number): string {
 	return attempts === 0 ? "—" : `${successes}/${attempts}`;
+}
+
+/** 按展示优先级返回统计字段；降序截断时从末尾丢弃。无近 7 日数据时返回空数组。 */
+export function formatStatsFields(summary: StatsSummary): string[] {
+	if (summary.weekAttempts === 0) return [];
+	return [
+		`1d ${formatAvailability(summary.todaySuccesses, summary.todayAttempts)}`,
+		`7d ${formatAvailability(summary.weekSuccesses, summary.weekAttempts)}`,
+		`P50 ${formatFirstByte(summary.firstByteP50)}`,
+		`P90 ${formatFirstByte(summary.firstByteP90)}`,
+		summary.weekTps === undefined ? "TPS —" : `TPS ${summary.weekTps.toFixed(1)}`,
+	];
 }

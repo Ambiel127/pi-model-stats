@@ -22,6 +22,17 @@ vi.mock("@earendil-works/pi-tui", () => ({
 	fuzzyFilter: (items: any[], query: string, getText: (item: any) => string) => items.filter((item) => getText(item).toLowerCase().includes(query.toLowerCase())),
 	truncateToWidth: (value: string, width: number) => value.slice(0, Math.max(0, width)),
 	visibleWidth: (value: string) => value.replace(/\x1b\[[0-9;]*m/g, "").length,
+	wrapTextWithAnsi: (value: string, width: number) => {
+		const size = Math.max(1, width);
+		const lines: string[] = [];
+		let current = "";
+		for (const word of value.split(" ")) {
+			const candidate = current ? `${current} ${word}` : word;
+			if (current && candidate.length > size) { lines.push(current); current = word; } else { current = candidate; }
+		}
+		if (current) lines.push(current);
+		return lines.length === 0 ? [""] : lines;
+	},
 }));
 vi.mock("../src/storage.js", () => ({}));
 
@@ -32,6 +43,11 @@ const model = (provider: string, id: string): ModelLike => ({ provider, id, api:
 
 const keybindings = { matches: (data: string, key: string) => (key === "tui.select.down" && data === "down") || (key === "tui.select.up" && data === "up") || (key === "tui.select.confirm" && data === "enter") || (key === "tui.select.cancel" && data === "escape") || (key === "tui.input.tab" && data === "tab") };
 const theme = { fg: (_kind: string, value: string) => value, bold: (value: string) => value };
+/** 详情行以 6 空格缩进（模型行前缀最多 4 列）；拼回换行处丢失的分隔空格，还原成完整内联文本。 */
+const DETAIL_INDENT = "      ";
+const detailOf = (lines: string[]) => lines.filter((line) => line.startsWith(DETAIL_INDENT)).map((line) => line.trim()).join(" ");
+/** 只取模型行：含统计且不是详情行。 */
+const modelRows = (lines: string[]) => lines.filter((line) => line.includes("1d ") && !line.startsWith(DETAIL_INDENT));
 function pickerContext(models: ModelLike[], custom: (factory: any) => Promise<unknown>) {
 	return { mode: "tui", model: models[0], modelRegistry: { getAvailable: () => models, getError: () => undefined, refresh: async () => ({ aborted: false, errors: new Map() }) }, scopedModels: [], ui: { custom } };
 }
@@ -84,7 +100,7 @@ describe("model picker runtime boundary", () => {
 		expect(await promise).toEqual(cached);
 	});
 
-	it("keeps statistics visible in narrow rows and selects through the public callback", async () => {
+	it("truncates statistics in narrow rows, expands them for the selection, and selects through the public callback", async () => {
 		const first = model("provider-a", "model-a");
 		const second = model("provider-b", "model-b");
 		let component: any;
@@ -110,14 +126,60 @@ describe("model picker runtime boundary", () => {
 		const store = { getSummary: (candidate: ModelLike) => candidate.id === second.id ? { todaySuccesses: 2, todayAttempts: 3, weekSuccesses: 3, weekAttempts: 4, firstByteP50: 1200, firstByteP90: 2400, weekTps: 40.2 } : { todaySuccesses: 0, todayAttempts: 0, weekSuccesses: 0, weekAttempts: 0 } };
 		const pickerPromise = showModelPicker(ctx as any, store as any);
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		const narrow = component.render(28).join("\n");
-		expect(narrow).toContain("今2/3");
-		expect(narrow).toContain("7日3/4");
-		expect(narrow).toContain("1.2s/2.4s");
-		expect(narrow).toContain("40.2t/s");
-		expect(narrow.split("\n").every((line: string) => line.length <= 28)).toBe(true);
+		const narrow = component.render(28);
+		expect(narrow.join("\n")).toContain("1d 2/3 · …");
+		expect(narrow.join("\n")).not.toContain("TPS");
+		expect(detailOf(narrow)).toBe("");
+		expect(narrow.every((line: string) => line.length <= 28)).toBe(true);
+
 		component.handleInput("down");
+		const expanded = component.render(28);
+		expect(detailOf(expanded)).toBe("1d 2/3 · 7d 3/4 · P50 1.2s · P90 2.4s · TPS 40.2");
+		expect(expanded.every((line: string) => line.length <= 28)).toBe(true);
+
+		const wide = component.render(80);
+		expect(detailOf(wide)).toBe("");
+		expect(wide.join("\n")).toContain("1d 2/3 · 7d 3/4 · P50 1.2s · P90 2.4s · TPS 40.2");
+		expect(wide.join("\n")).not.toContain("…");
+
 		component.handleInput("enter");
 		expect(await pickerPromise).toEqual(second);
+	});
+
+	it("aligns statistics into a single column across rows", async () => {
+		const models = [model("provider-a", "short"), model("provider-b", "a-much-longer-model-id"), model("provider-c", "mid-name")];
+		let component: any;
+		let finish!: (value: ModelLike | null) => void;
+		const selected = new Promise<ModelLike | null>((resolve) => { finish = resolve; });
+		const ctx = pickerContext(models, async (factory) => { component = factory({ requestRender() {} }, theme, keybindings, finish); return selected; });
+		const store = { getSummary: () => ({ todaySuccesses: 7, todayAttempts: 7, weekSuccesses: 3, weekAttempts: 4, firstByteP50: 3200, firstByteP90: 4100, weekTps: 67.7 }) };
+		const promise = showModelPicker(ctx as any, store as any);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const rows = component.render(100).filter((line: string) => line.includes("1d 7/7"));
+		expect(rows.length).toBe(3);
+		expect(new Set(rows.map((line: string) => line.indexOf("1d 7/7"))).size).toBe(1);
+		component.handleInput("escape");
+		expect(await promise).toBeNull();
+	});
+
+	it("keeps the current-model marker in front so it survives narrow widths", async () => {
+		const models = [model("provider-a", "claude-sonnet-4-5"), model("provider-b", "gpt-5.2")];
+		let component: any;
+		let finish!: (value: ModelLike | null) => void;
+		const selected = new Promise<ModelLike | null>((resolve) => { finish = resolve; });
+		const ctx = pickerContext(models, async (factory) => { component = factory({ requestRender() {} }, theme, keybindings, finish); return selected; });
+		const store = { getSummary: () => ({ todaySuccesses: 7, todayAttempts: 7, weekSuccesses: 42, weekAttempts: 45, firstByteP50: 3200, firstByteP90: 4100, weekTps: 67.7 }) };
+		const promise = showModelPicker(ctx as any, store as any);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// 名字已被截到只剩前缀，标记仍在第 2 列；id 起始列与非当前行一致（标记恒占 2 列）
+		const narrow = modelRows(component.render(34));
+		expect(narrow.length).toBe(2);
+		expect(narrow[0]!.startsWith("→ ✓ ")).toBe(true);
+		expect(narrow[1]!.indexOf("✓")).toBe(-1);
+		// 标记恒占 2 列，所以当前行与非当前行的 id 起始列一致
+		expect(narrow[0]!.indexOf("claude")).toBe(4);
+		expect(narrow[1]!.indexOf("gpt")).toBe(4);
+		component.handleInput("escape");
+		expect(await promise).toBeNull();
 	});
 });

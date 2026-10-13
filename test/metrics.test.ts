@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyError, formatAvailability, formatFirstByte, resultFromStopReason, summarizeObservations } from "../src/metrics.js";
+import { classifyError, formatAvailability, formatFirstByte, formatStatsFields, resultFromStopReason, summarizeObservations } from "../src/metrics.js";
 
 describe("metrics", () => {
 	it("maps stop reasons and summarizes daily observations", () => {
@@ -52,9 +52,17 @@ describe("metrics", () => {
 	});
 
 	it("formats first-byte display units", () => {
-		expect(formatFirstByte(150)).toBe("首字 150ms");
-		expect(formatFirstByte(1500)).toBe("首字 1.5s");
-		expect(formatFirstByte(undefined)).toBe("首字 —");
+		expect(formatFirstByte(150)).toBe("150ms");
+		expect(formatFirstByte(1500)).toBe("1.5s");
+		expect(formatFirstByte(undefined)).toBe("—");
+	});
+
+	it("orders stats fields by display priority and omits them without week data", () => {
+		const summary = { todaySuccesses: 1, todayAttempts: 2, weekSuccesses: 3, weekAttempts: 4, firstByteP50: 1500, firstByteP90: 2400, weekTps: 40.24 };
+		expect(formatStatsFields(summary)).toEqual(["1d 1/2", "7d 3/4", "P50 1.5s", "P90 2.4s", "TPS 40.2"]);
+		expect(formatStatsFields({ ...summary, weekTps: undefined })[4]).toBe("TPS —");
+		expect(formatStatsFields({ ...summary, firstByteP90: undefined })[3]).toBe("P90 —");
+		expect(formatStatsFields({ todaySuccesses: 0, todayAttempts: 0, weekSuccesses: 0, weekAttempts: 0 })).toEqual([]);
 	});
 
 });

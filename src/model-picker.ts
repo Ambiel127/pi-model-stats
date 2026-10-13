@@ -1,8 +1,8 @@
 import { DynamicBorder, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { fuzzyFilter, Input, truncateToWidth, visibleWidth, type Component, type KeybindingsManager } from "@earendil-works/pi-tui";
+import { fuzzyFilter, Input, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type KeybindingsManager } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { formatAvailability, formatFirstByte } from "./metrics.js";
+import { formatStatsFields } from "./metrics.js";
 import { StatsStore } from "./storage.js";
 import type { ModelLike } from "./types.js";
 
@@ -13,6 +13,37 @@ type ModelRow = { model: AnyModel };
 
 function sameModel(left: AnyModel | undefined, right: AnyModel | undefined): boolean {
 	return Boolean(left && right && left.provider === right.provider && left.id === right.id);
+}
+
+const FIELD_SEPARATOR = " · ";
+const FIELD_ELLIPSIS = " · …";
+const FIELD_ELLIPSIS_WIDTH = visibleWidth(FIELD_ELLIPSIS);
+const MIN_NAME_WIDTH = 12;
+const MIN_SUFFIX_WIDTH = 12;
+
+type RenderRow = { left: string; fields: string[]; isSelected: boolean };
+
+/** 名字预算：完整容纳可见行里最长的名字，但最少留 MIN_SUFFIX_WIDTH 列给统计。 */
+function resolveNameBudget(rows: readonly RenderRow[], width: number): number {
+	const longest = rows.reduce((max, row) => Math.max(max, visibleWidth(row.left)), 0);
+	return Math.max(MIN_NAME_WIDTH, Math.min(longest, width - MIN_SUFFIX_WIDTH));
+}
+
+/** 取所有可见行都容纳得下的最大字段数，保证同屏字段数一致、列对齐。 */
+function resolveFieldCount(rows: readonly RenderRow[], budget: number): number {
+	const candidates = rows.filter((row) => row.fields.length > 0);
+	if (candidates.length === 0) return 0;
+	const max = Math.max(...candidates.map((row) => row.fields.length));
+	let count = 0;
+	for (let n = 1; n <= max; n++) {
+		const fits = candidates.every((row) => {
+			const needed = visibleWidth(row.fields.slice(0, n).join(FIELD_SEPARATOR));
+			return needed + (n < row.fields.length ? FIELD_ELLIPSIS_WIDTH : 0) <= budget;
+		});
+		if (!fits) break;
+		count = n;
+	}
+	return count;
 }
 
 export async function showModelPicker(ctx: ExtensionContext, store: StatsStore): Promise<AnyModel | null> {
@@ -194,28 +225,33 @@ class ModelStatsPicker implements Component {
 		const maxVisible = 10;
 		const start = Math.max(0, Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible));
 		const end = Math.min(start + maxVisible, this.filteredModels.length);
+		const rows: RenderRow[] = [];
 		for (let index = start; index < end; index++) {
 			const row = this.filteredModels[index]!;
-			const isSelected = index === this.selectedIndex;
-			const current = sameModel(this.currentModel, row.model) ? " ✓" : "";
-			const summary = this.store.getSummary(row.model);
-			const tps = summary.weekTps === undefined ? "TPS —" : `TPS ${summary.weekTps.toFixed(1)} t/s`;
-			const fullSuffix = summary.weekAttempts > 0
-				? `今日 ${formatAvailability(summary.todaySuccesses, summary.todayAttempts)} · 7日 ${formatAvailability(summary.weekSuccesses, summary.weekAttempts)} · P50 ${formatFirstByte(summary.firstByteP50).replace("首字 ", "")} · P90 ${formatFirstByte(summary.firstByteP90).replace("首字 ", "")} · ${tps}`
-				: "";
-			const compactSuffix = summary.weekAttempts > 0
-				? `今${formatAvailability(summary.todaySuccesses, summary.todayAttempts)}·7日${formatAvailability(summary.weekSuccesses, summary.weekAttempts)}·${formatFirstByte(summary.firstByteP50).replace("首字 ", "")}/${formatFirstByte(summary.firstByteP90).replace("首字 ", "")}·${summary.weekTps === undefined ? "TPS —" : `${summary.weekTps.toFixed(1)}t/s`}`
-				: "";
-			const suffix = fullSuffix && visibleWidth(fullSuffix) + 2 <= width ? fullSuffix : compactSuffix;
-			const prefix = isSelected ? "→ " : "  ";
-			const left = `${prefix}${row.model.id} [${row.model.provider}]${current}`;
-			const styledSuffix = suffix ? this.theme.fg("muted", suffix) : "";
-			const suffixWidth = visibleWidth(styledSuffix);
-			const leftWidth = suffix ? Math.max(0, width - suffixWidth - 2) : width;
-			const leftText = truncateToWidth(left, leftWidth, "");
-			const styledLeft = isSelected ? this.theme.fg("accent", leftText) : leftText;
-			const separator = suffix && leftText.length > 0 ? "  " : "";
-			lines.push(truncateToWidth(`${styledLeft}${separator}${styledSuffix}`, width, ""));
+			// 与 pi 原生 model-selector 一致：标记置于名字前，且恒定占 2 列以保证 id 纵向对齐。
+			const currentMarker = sameModel(this.currentModel, row.model) ? "✓ " : "  ";
+			rows.push({
+				left: `${index === this.selectedIndex ? "→ " : "  "}${currentMarker}${row.model.id} [${row.model.provider}]`,
+				fields: formatStatsFields(this.store.getSummary(row.model)),
+				isSelected: index === this.selectedIndex,
+			});
+		}
+		const nameBudget = resolveNameBudget(rows, width);
+		const fieldCount = resolveFieldCount(rows, Math.max(0, width - nameBudget - 2));
+		for (const row of rows) {
+			const truncated = row.fields.length > fieldCount;
+			const shown = row.fields.slice(0, fieldCount);
+			const suffix = shown.length === 0 ? "" : shown.join(FIELD_SEPARATOR) + (truncated ? FIELD_ELLIPSIS : "");
+			const leftText = truncateToWidth(row.left, suffix ? nameBudget : width, "");
+			const styledLeft = row.isSelected ? this.theme.fg("accent", leftText) : leftText;
+			const pad = suffix ? `${" ".repeat(Math.max(0, nameBudget - visibleWidth(leftText)))}  ` : "";
+			lines.push(truncateToWidth(`${styledLeft}${pad}${suffix ? this.theme.fg("muted", suffix) : ""}`, width, ""));
+			if (row.isSelected && truncated) {
+				// 6 空格缩进：模型行前缀最多占 4 列（光标 2 + 当前标记 2），详情行需与之区分。
+				for (const detail of wrapTextWithAnsi(row.fields.join(FIELD_SEPARATOR), Math.max(1, width - 6))) {
+					lines.push(truncateToWidth(this.theme.fg("dim", `      ${detail}`), width, ""));
+				}
+			}
 		}
 		if (this.filteredModels.length === 0) lines.push(truncateToWidth(this.theme.fg("muted", "  No matching models"), width, ""));
 		else lines.push(truncateToWidth(this.theme.fg("dim", `  ${this.selectedIndex + 1}/${this.filteredModels.length}`), width, ""));
