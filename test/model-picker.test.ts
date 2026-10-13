@@ -41,7 +41,7 @@ import type { ModelLike } from "../src/types.js";
 
 const model = (provider: string, id: string): ModelLike => ({ provider, id, api: "openai-completions", baseUrl: `https://${provider}.test/v1` });
 
-const keybindings = { matches: (data: string, key: string) => (key === "tui.select.down" && data === "down") || (key === "tui.select.up" && data === "up") || (key === "tui.select.confirm" && data === "enter") || (key === "tui.select.cancel" && data === "escape") || (key === "tui.input.tab" && data === "tab") };
+const keybindings = { matches: (data: string, key: string) => (key === "tui.select.down" && data === "down") || (key === "tui.select.up" && data === "up") || (key === "tui.select.confirm" && data === "enter") || (key === "tui.select.cancel" && data === "escape") || (key === "tui.input.tab" && data === "tab"), getKeys: (id: string) => (id === "tui.select.confirm" ? ["enter"] : id === "tui.select.cancel" ? ["escape"] : id === "tui.input.tab" ? ["tab"] : []) };
 const theme = { fg: (_kind: string, value: string) => value, bold: (value: string) => value };
 /** 详情行以 6 空格缩进（模型行前缀最多 4 列）；拼回换行处丢失的分隔空格，还原成完整内联文本。 */
 const DETAIL_INDENT = "      ";
@@ -56,7 +56,7 @@ describe("model picker runtime boundary", () => {
 	it("reports non-TUI mode and cancellation without selecting a model", async () => {
 		const notify = vi.fn();
 		expect(await showModelPicker({ mode: "headless", ui: { notify } } as any, {} as any)).toBeNull();
-		expect(notify).toHaveBeenCalledWith("/model-stats 仅在 TUI 模式可用", "warning");
+		expect(notify).toHaveBeenCalledWith("/model-stats is only available in TUI mode", "warning");
 		const first = model("provider-a", "model-a");
 		let component: any;
 		let finish!: (value: ModelLike | null) => void;
@@ -98,6 +98,23 @@ describe("model picker runtime boundary", () => {
 		expect(component.render(80).join("\\n")).toContain("Could not refresh model catalogs: offline");
 		component.handleInput("enter");
 		expect(await promise).toEqual(cached);
+	});
+
+	it("shows the selected model's display name and falls back to its id", async () => {
+		const named: ModelLike = { ...model("provider-a", "model-a"), name: "Claude Sonnet 4.5" };
+		const unnamed = model("provider-b", "model-b");
+		let component: any;
+		let finish!: (value: ModelLike | null) => void;
+		const selected = new Promise<ModelLike | null>((resolve) => { finish = resolve; });
+		const ctx = pickerContext([named, unnamed], async (factory) => { component = factory({ requestRender() {} }, theme, keybindings, finish); return selected; });
+		const promise = showModelPicker(ctx as any, { getSummary: () => ({ todaySuccesses: 7, todayAttempts: 7, weekSuccesses: 7, weekAttempts: 7, firstByteP50: 3200, firstByteP90: 4100, weekTps: 67.7 }) } as any);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const nameLine = (lines: string[]) => lines.find((line) => line.includes("Model Name:"));
+		expect(nameLine(component.render(80))).toBe("  Model Name: Claude Sonnet 4.5");
+		component.handleInput("down");
+		expect(nameLine(component.render(80))).toBe("  Model Name: model-b");
+		finish(null);
+		await promise;
 	});
 
 	it("truncates statistics in narrow rows, expands them for the selection, and selects through the public callback", async () => {
@@ -168,7 +185,7 @@ describe("model picker runtime boundary", () => {
 		let finish!: (value: ModelLike | null) => void;
 		const selected = new Promise<ModelLike | null>((resolve) => { finish = resolve; });
 		const ctx = pickerContext(models, async (factory) => { component = factory({ requestRender() {} }, theme, keybindings, finish); return selected; });
-		// 两行的 1d / 7d 字段宽度不同（6 列 vs 10 列）；不逐列补齐时后续字段的起始列会错开 4 列。
+		// 两行的 day / week 字段宽度不同（6 列 vs 10 列）；不逐列补齐时后续字段的起始列会错开 4 列。
 		const store = { getSummary: (target: ModelLike) => (target.id === "aaa"
 			? { todaySuccesses: 7, todayAttempts: 7, weekSuccesses: 3, weekAttempts: 4, firstByteP50: 3200, firstByteP90: 4100, weekTps: 67.7 }
 			: { todaySuccesses: 123, todayAttempts: 456, weekSuccesses: 300, weekAttempts: 400, firstByteP50: 9900, firstByteP90: 88000, weekTps: 5 }) };
@@ -176,7 +193,7 @@ describe("model picker runtime boundary", () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		const rows = modelRows(component.render(120));
 		expect(rows.length).toBe(2);
-		for (const column of ["1d", "7d", "P50", "P90", "TPS"]) {
+		for (const column of ["day", "week", "P50", "P90", "TPS"]) {
 			const positions = new Set(rows.map((line: string) => line.indexOf(column)));
 			expect(positions.size, column).toBe(1);
 		}

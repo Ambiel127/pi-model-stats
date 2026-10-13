@@ -1,5 +1,5 @@
 import { DynamicBorder, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { fuzzyFilter, Input, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type KeybindingsManager } from "@earendil-works/pi-tui";
+import { fuzzyFilter, Input, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Keybinding, type KeybindingsManager } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { formatStatsFields } from "./metrics.js";
@@ -20,7 +20,8 @@ const FIELD_SEPARATOR_WIDTH = visibleWidth(FIELD_SEPARATOR);
 const FIELD_ELLIPSIS = " · …";
 const FIELD_ELLIPSIS_WIDTH = visibleWidth(FIELD_ELLIPSIS);
 const MIN_NAME_WIDTH = 12;
-const MIN_SUFFIX_WIDTH = 12;
+/** 统计区最小保留宽度：需容纳「一个字段 + 省略号」再加模型行与统计区之间的 2 列间隙，否则窄屏下一个字段都放不下。 */
+const MIN_SUFFIX_WIDTH = 14;
 
 type RenderRow = { left: string; fields: string[]; isSelected: boolean };
 
@@ -61,7 +62,7 @@ function resolveFieldCount(rows: readonly RenderRow[], widths: readonly number[]
 
 export async function showModelPicker(ctx: ExtensionContext, store: StatsStore): Promise<AnyModel | null> {
 	if (ctx.mode !== "tui") {
-		ctx.ui.notify("/model-stats 仅在 TUI 模式可用", "warning");
+		ctx.ui.notify("/model-stats is only available in TUI mode", "warning");
 		return null;
 	}
 	return ctx.ui.custom<AnyModel | null>((tui, theme, keybindings, done) => {
@@ -119,8 +120,8 @@ class ModelStatsPicker implements Component {
 	) {
 		this.scopedModelItems = scopedModels;
 		this.scope = scopedModels.length > 0 ? "scoped" : "all";
-		this.topBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
-		this.bottomBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
+		this.topBorder = new DynamicBorder((s: string) => theme.fg("border", s));
+		this.bottomBorder = new DynamicBorder((s: string) => theme.fg("border", s));
 		this.setSnapshot(this.registry.getAvailable(), scopedModels);
 		this.refreshTimeout = setTimeout(() => this.refreshController.abort(), 15_000);
 		void this.refreshModels();
@@ -226,27 +227,49 @@ class ModelStatsPicker implements Component {
 		this.tui.requestRender();
 	}
 
+	/** 复刻 pi 原生 keybinding-hints：多键以 / 分隔、修饰键以 + 连接，macOS 上 alt 显示为 option。 */
+	private formatKeys(id: Keybinding, capitalize: boolean): string {
+		return this.keybindings.getKeys(id)
+			.map((key) => key.split("+").map((part) => {
+				const display = process.platform === "darwin" && part.toLowerCase() === "alt" ? "option" : part;
+				return capitalize ? display.charAt(0).toUpperCase() + display.slice(1) : display;
+			}).join("+"))
+			.join("/");
+	}
+
+	private keyHint(id: Keybinding, description: string): string {
+		return this.theme.fg("dim", this.formatKeys(id, false)) + this.theme.fg("muted", ` ${description}`);
+	}
+
 	render(width: number): string[] {
-		const lines: string[] = [...this.topBorder.render(width), truncateToWidth(this.theme.fg("accent", this.theme.bold("Model Stats")), width, "")];
+		// 空行节奏对齐 pi 原生 model-selector：边框后、头部信息后、输入框后各留一行。
+		const lines: string[] = [...this.topBorder.render(width), ""];
+		lines.push(truncateToWidth(this.theme.fg("muted", "Model Stats"), width, ""));
 		if (this.scopedModels.length > 0) {
 			const all = this.scope === "all" ? this.theme.fg("accent", "all") : this.theme.fg("muted", "all");
 			const scoped = this.scope === "scoped" ? this.theme.fg("accent", "scoped") : this.theme.fg("muted", "scoped");
-			lines.push(truncateToWidth(`${this.theme.fg("muted", "Scope: ")}${all}${this.theme.fg("muted", " | ")}${scoped}  ${this.theme.fg("dim", "Tab 切换")}`, width, ""));
+			lines.push(truncateToWidth(`${this.theme.fg("muted", "Scope: ")}${all}${this.theme.fg("muted", " | ")}${scoped}`, width, ""));
+			lines.push(truncateToWidth(this.keyHint("tui.input.tab", "(all/scoped)"), width, ""));
 		}
-		const searchLines = this.searchInput.render(Math.max(1, width - 8));
-		lines.push(truncateToWidth(`${this.theme.fg("muted", "搜索: ")}${searchLines[0] ?? ""}`, width, ""));
+		lines.push("");
+		lines.push(...this.searchInput.render(Math.max(1, width)));
+		lines.push("");
 		const maxVisible = 10;
 		const start = Math.max(0, Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible));
 		const end = Math.min(start + maxVisible, this.filteredModels.length);
 		const rows: RenderRow[] = [];
 		for (let index = start; index < end; index++) {
 			const row = this.filteredModels[index]!;
-			// 与 pi 原生 model-selector 一致：标记置于名字前，且恒定占 2 列以保证 id 纵向对齐。
-			const currentMarker = sameModel(this.currentModel, row.model) ? "✓ " : "  ";
+			const isSelected = index === this.selectedIndex;
+			// 分段染色对齐 pi：cursor 与 ✓ 恒为 accent、id 仅选中时 accent、[provider] 恒为 muted。
+			// 标记恒定占 2 列以保证 id 纵向对齐。
+			const cursor = isSelected ? this.theme.fg("accent", "→ ") : "  ";
+			const currentMarker = sameModel(this.currentModel, row.model) ? this.theme.fg("accent", "✓ ") : "  ";
+			const modelText = isSelected ? this.theme.fg("accent", row.model.id) : row.model.id;
 			rows.push({
-				left: `${index === this.selectedIndex ? "→ " : "  "}${currentMarker}${row.model.id} [${row.model.provider}]`,
+				left: `${cursor}${currentMarker}${modelText} ${this.theme.fg("muted", `[${row.model.provider}]`)}`,
 				fields: formatStatsFields(this.store.getSummary(row.model)),
-				isSelected: index === this.selectedIndex,
+				isSelected,
 			});
 		}
 		const nameBudget = resolveNameBudget(rows, width);
@@ -258,9 +281,8 @@ class ModelStatsPicker implements Component {
 			const shown = row.fields.slice(0, fieldCount).map((field, index) => padField(field, fieldWidths[index] ?? 0));
 			const suffix = shown.length === 0 ? "" : shown.join(FIELD_SEPARATOR).replace(/\s+$/, "") + (truncated ? FIELD_ELLIPSIS : "");
 			const leftText = truncateToWidth(row.left, suffix ? nameBudget : width, "");
-			const styledLeft = row.isSelected ? this.theme.fg("accent", leftText) : leftText;
 			const pad = suffix ? `${" ".repeat(Math.max(0, nameBudget - visibleWidth(leftText)))}  ` : "";
-			lines.push(truncateToWidth(`${styledLeft}${pad}${suffix ? this.theme.fg("muted", suffix) : ""}`, width, ""));
+			lines.push(truncateToWidth(`${leftText}${pad}${suffix ? this.theme.fg("muted", suffix) : ""}`, width, ""));
 			if (row.isSelected && truncated) {
 				// 6 空格缩进：模型行前缀最多占 4 列（光标 2 + 当前标记 2），详情行需与之区分。
 				for (const detail of wrapTextWithAnsi(row.fields.join(FIELD_SEPARATOR), Math.max(1, width - 6))) {
@@ -268,10 +290,26 @@ class ModelStatsPicker implements Component {
 				}
 			}
 		}
-		if (this.filteredModels.length === 0) lines.push(truncateToWidth(this.theme.fg("muted", "  No matching models"), width, ""));
-		else lines.push(truncateToWidth(this.theme.fg("dim", `  ${this.selectedIndex + 1}/${this.filteredModels.length}`), width, ""));
-		if (this.errorMessage) lines.push(truncateToWidth(this.theme.fg("error", `  ${this.errorMessage}`), width, ""));
-		if (this.refreshMessage) lines.push(truncateToWidth(this.theme.fg(this.refreshSuccess ? "success" : "muted", `  ${this.refreshMessage}`), width, ""));
+		// 滚动指示对齐 pi：muted、带括号，且仅在列表真被截断时出现。
+		if (start > 0 || end < this.filteredModels.length) {
+			lines.push(truncateToWidth(this.theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredModels.length})`), width, ""));
+		}
+		// pi 中错误与「无结果」互斥，且错误按行渲染、不缩进。
+		if (this.errorMessage) {
+			for (const message of this.errorMessage.split("\n")) lines.push(truncateToWidth(this.theme.fg("error", message), width, ""));
+		} else if (this.filteredModels.length === 0) {
+			lines.push(truncateToWidth(this.theme.fg("muted", "  No matching models"), width, ""));
+		} else {
+			// 对齐 pi：无错误且有结果时，单独一行显示选中模型的展示名（model.name，非列表行用的 id）。
+			// ModelLike.name 为可选，缺失时回退到 id，避免渲染出 "undefined"。
+			const selected = this.filteredModels[this.selectedIndex]!;
+			lines.push("", truncateToWidth(this.theme.fg("muted", `  Model Name: ${selected.model.name ?? selected.model.id}`), width, ""));
+		}
+		if (this.refreshMessage) {
+			lines.push("", truncateToWidth(this.theme.fg(this.refreshSuccess ? "success" : "muted", `  ${this.refreshMessage}`), width, ""));
+		}
+		lines.push("");
+		lines.push(truncateToWidth(this.theme.fg("dim", `  ${this.formatKeys("tui.select.confirm", true)} to select · ${this.formatKeys("tui.select.cancel", true)} to cancel`), width, ""));
 		lines.push(...this.bottomBorder.render(width));
 		return lines.map((line) => truncateToWidth(line, width, ""));
 	}
