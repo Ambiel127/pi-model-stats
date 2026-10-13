@@ -1,4 +1,5 @@
 node_modules/
 test/.test-agent/
 .pi/
+.lithe/
 *.log
