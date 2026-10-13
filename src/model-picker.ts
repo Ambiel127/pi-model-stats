@@ -16,6 +16,7 @@ function sameModel(left: AnyModel | undefined, right: AnyModel | undefined): boo
 }
 
 const FIELD_SEPARATOR = " · ";
+const FIELD_SEPARATOR_WIDTH = visibleWidth(FIELD_SEPARATOR);
 const FIELD_ELLIPSIS = " · …";
 const FIELD_ELLIPSIS_WIDTH = visibleWidth(FIELD_ELLIPSIS);
 const MIN_NAME_WIDTH = 12;
@@ -29,18 +30,30 @@ function resolveNameBudget(rows: readonly RenderRow[], width: number): number {
 	return Math.max(MIN_NAME_WIDTH, Math.min(longest, width - MIN_SUFFIX_WIDTH));
 }
 
-/** 取所有可见行都容纳得下的最大字段数，保证同屏字段数一致、列对齐。 */
-function resolveFieldCount(rows: readonly RenderRow[], budget: number): number {
+/** 按可见宽度补齐字段。字段当前不含 ANSI，但用 visibleWidth 而非 length，以免将来加样式时错位。 */
+function padField(field: string, width: number): string {
+	return field + " ".repeat(Math.max(0, width - visibleWidth(field)));
+}
+
+/** 每个字段列在同屏所有行中的最大可见宽度。补齐后各行的同一字段才真正纵向对齐，而不只是首列对齐。 */
+function resolveFieldWidths(rows: readonly RenderRow[]): number[] {
+	const widths: number[] = [];
+	for (const row of rows) {
+		row.fields.forEach((field, index) => { widths[index] = Math.max(widths[index] ?? 0, visibleWidth(field)); });
+	}
+	return widths;
+}
+
+/** 取所有可见行都容纳得下的最大字段数（按补齐后的列宽计算），保证同屏字段数一致且列对齐。 */
+function resolveFieldCount(rows: readonly RenderRow[], widths: readonly number[], budget: number): number {
 	const candidates = rows.filter((row) => row.fields.length > 0);
 	if (candidates.length === 0) return 0;
 	const max = Math.max(...candidates.map((row) => row.fields.length));
 	let count = 0;
 	for (let n = 1; n <= max; n++) {
-		const fits = candidates.every((row) => {
-			const needed = visibleWidth(row.fields.slice(0, n).join(FIELD_SEPARATOR));
-			return needed + (n < row.fields.length ? FIELD_ELLIPSIS_WIDTH : 0) <= budget;
-		});
-		if (!fits) break;
+		// 最宽那一行的末列刚好无需补齐，所以 sum(widths[0..n-1]) 就是实际占宽，不是高估。
+		const needed = widths.slice(0, n).reduce((sum, width) => sum + width, 0) + (n - 1) * FIELD_SEPARATOR_WIDTH + (n < max ? FIELD_ELLIPSIS_WIDTH : 0);
+		if (needed > budget) break;
 		count = n;
 	}
 	return count;
@@ -237,11 +250,13 @@ class ModelStatsPicker implements Component {
 			});
 		}
 		const nameBudget = resolveNameBudget(rows, width);
-		const fieldCount = resolveFieldCount(rows, Math.max(0, width - nameBudget - 2));
+		const fieldWidths = resolveFieldWidths(rows);
+		const fieldCount = resolveFieldCount(rows, fieldWidths, Math.max(0, width - nameBudget - 2));
 		for (const row of rows) {
 			const truncated = row.fields.length > fieldCount;
-			const shown = row.fields.slice(0, fieldCount);
-			const suffix = shown.length === 0 ? "" : shown.join(FIELD_SEPARATOR) + (truncated ? FIELD_ELLIPSIS : "");
+			// 逐列补齐后再拼接；末列的尾随空格无意义，裁掉以免白占宽度。详情行不补齐（单行无需对齐）。
+			const shown = row.fields.slice(0, fieldCount).map((field, index) => padField(field, fieldWidths[index] ?? 0));
+			const suffix = shown.length === 0 ? "" : shown.join(FIELD_SEPARATOR).replace(/\s+$/, "") + (truncated ? FIELD_ELLIPSIS : "");
 			const leftText = truncateToWidth(row.left, suffix ? nameBudget : width, "");
 			const styledLeft = row.isSelected ? this.theme.fg("accent", leftText) : leftText;
 			const pad = suffix ? `${" ".repeat(Math.max(0, nameBudget - visibleWidth(leftText)))}  ` : "";

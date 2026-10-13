@@ -162,6 +162,28 @@ describe("model picker runtime boundary", () => {
 		expect(await promise).toBeNull();
 	});
 
+	it("aligns every statistics column, not just the first", async () => {
+		const models = [model("provider-a", "aaa"), model("provider-b", "bbb")];
+		let component: any;
+		let finish!: (value: ModelLike | null) => void;
+		const selected = new Promise<ModelLike | null>((resolve) => { finish = resolve; });
+		const ctx = pickerContext(models, async (factory) => { component = factory({ requestRender() {} }, theme, keybindings, finish); return selected; });
+		// 两行的 1d / 7d 字段宽度不同（6 列 vs 10 列）；不逐列补齐时后续字段的起始列会错开 4 列。
+		const store = { getSummary: (target: ModelLike) => (target.id === "aaa"
+			? { todaySuccesses: 7, todayAttempts: 7, weekSuccesses: 3, weekAttempts: 4, firstByteP50: 3200, firstByteP90: 4100, weekTps: 67.7 }
+			: { todaySuccesses: 123, todayAttempts: 456, weekSuccesses: 300, weekAttempts: 400, firstByteP50: 9900, firstByteP90: 88000, weekTps: 5 }) };
+		const promise = showModelPicker(ctx as any, store as any);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const rows = modelRows(component.render(120));
+		expect(rows.length).toBe(2);
+		for (const column of ["1d", "7d", "P50", "P90", "TPS"]) {
+			const positions = new Set(rows.map((line: string) => line.indexOf(column)));
+			expect(positions.size, column).toBe(1);
+		}
+		component.handleInput("escape");
+		expect(await promise).toBeNull();
+	});
+
 	it("keeps the current-model marker in front so it survives narrow widths", async () => {
 		const models = [model("provider-a", "claude-sonnet-4-5"), model("provider-b", "gpt-5.2")];
 		let component: any;
