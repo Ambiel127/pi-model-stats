@@ -52,6 +52,25 @@ function pickerContext(models: ModelLike[], custom: (factory: any) => Promise<un
 	return { mode: "tui", model: models[0], modelRegistry: { getAvailable: () => models, getError: () => undefined, refresh: async () => ({ aborted: false, errors: new Map() }) }, scopedModels: [], ui: { custom } };
 }
 
+/** 用自定义键位表驱动 render 验证 formatKeys：theme.fg 在桩里是恒等函数，输出无 ANSI 需剥离。 */
+const keysStub = (map: Record<string, string[]>) => ({ ...keybindings, getKeys: (id: string) => map[id] ?? [] });
+const hintLine = (lines: string[]) => lines.find((line) => line.includes("to select")) ?? "";
+/** formatKeys 在调用时读 process.platform，故可运行时覆盖；用完必须还原，避免污染其它用例。 */
+const withPlatform = async (platform: string, run: () => Promise<void>): Promise<void> => {
+	const original = process.platform;
+	Object.defineProperty(process, "platform", { value: platform, configurable: true });
+	try { await run(); } finally { Object.defineProperty(process, "platform", { value: original, configurable: true }); }
+};
+async function openWithKeys(map: Record<string, string[]>) {
+	let component: any;
+	let finish!: (value: ModelLike | null) => void;
+	const selected = new Promise<ModelLike | null>((resolve) => { finish = resolve; });
+	const ctx = pickerContext([model("provider-a", "model-a")], async (factory) => { component = factory({ requestRender() {} }, theme, keysStub(map), finish); return selected; });
+	const promise = showModelPicker(ctx as any, { getSummary: () => ({ todaySuccesses: 7, todayAttempts: 7, weekSuccesses: 7, weekAttempts: 7, firstByteP50: 3200, firstByteP90: 4100, weekTps: 67.7 }) } as any);
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	return { hint: () => hintLine(component.render(80) as string[]), close: async () => { finish(null); await promise; } };
+}
+
 describe("model picker runtime boundary", () => {
 	it("reports non-TUI mode and cancellation without selecting a model", async () => {
 		const notify = vi.fn();
@@ -115,6 +134,43 @@ describe("model picker runtime boundary", () => {
 		expect(nameLine(component.render(80))).toBe("  Model Name: model-b");
 		finish(null);
 		await promise;
+	});
+
+	it("joins alternate keys with / and modifiers with +, capitalizing the first letter", async () => {
+		const picker = await openWithKeys({ "tui.select.confirm": ["enter", "ctrl+m"], "tui.select.cancel": ["escape"] });
+		expect(picker.hint()).toContain("Enter/Ctrl+M to select · Escape to cancel");
+		await picker.close();
+	});
+
+	it("renders alt as option only on macOS", async () => {
+		const map = { "tui.select.confirm": ["alt+enter"], "tui.select.cancel": ["escape"] };
+		await withPlatform("darwin", async () => {
+			const picker = await openWithKeys(map);
+			expect(picker.hint()).toContain("Option+Enter to select");
+			await picker.close();
+		});
+		await withPlatform("win32", async () => {
+			const picker = await openWithKeys(map);
+			expect(picker.hint()).toContain("Alt+Enter to select");
+			await picker.close();
+		});
+	});
+
+	it("does not lowercase the non-alt parts of a modifier combo", async () => {
+		// 钉住非 darwin 分支：alt 保持原样，且 capitalize 只作用于每段首字母，不改变其余大小写。
+		// 必须显式固定平台，否则在 macOS 上 alt 会被转成 option，断言随宿主机漂移。
+		await withPlatform("win32", async () => {
+			const picker = await openWithKeys({ "tui.select.confirm": ["ctrl+alt+enter"], "tui.select.cancel": ["escape"] });
+			expect(picker.hint()).toContain("Ctrl+Alt+Enter to select");
+			await picker.close();
+		});
+	});
+
+	it("leaves an empty key slot when nothing is bound", async () => {
+		const picker = await openWithKeys({});
+		// 现状钉住：getKeys 返回空数组时 formatKeys 得到空串，提示行退化成没有键名的 "to select · to cancel"。
+		expect(picker.hint()).toMatch(/^\s+to select ·\s+to cancel$/);
+		await picker.close();
 	});
 
 	it("truncates statistics in narrow rows, expands them for the selection, and selects through the public callback", async () => {
