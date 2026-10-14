@@ -27,9 +27,11 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # Node 22 自带 npm 10.x，而 trusted publishing 需要 npm >= 11.5.1
+      # Node 22 自带的 npm 10.x 不满足 trusted publishing 要求的 >= 11.5.1。
+      # 钉 11.x 而非 @latest：npm 12 要求 node >= 22.22.2，而 node-version: 22
+      # 可能给到更低的 22.x；且 npm 12 默认 allow-remote=none 会引入额外风险。
       - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - run: npm ci
 
