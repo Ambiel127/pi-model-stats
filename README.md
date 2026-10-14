@@ -1,107 +1,71 @@
-# pi-model-stats
+# ▦ pi-model-stats
 
-Pi 扩展：在不主动发送探测请求的前提下，被动统计模型调用表现，并提供带统计信息的模型选择器。扩展只观察 Pi provider 生命周期及 assistant 流事件，不改变请求参数或重试逻辑。
+**[Pi](https://github.com/earendil-works/pi) 扩展：根据实际调用表现比较模型延迟与吞吐，帮助你选择合适的模型；不发送模型探测请求。**
 
-## 功能概览
+[English](README.en.md) · 简体中文
 
-- `/model-stats`：打开模型选择器；`Ctrl+Alt+L`：快捷打开。
-- 显示模型 `1d` / `7d` 成功数与有效请求数、首字延迟 `P50` / `P90`，以及 `7d` 窗口的 `TPS`（满足数据条件时）。窄终端下内联按优先级从末尾丢弃字段并以 `…` 标记，选中行在下方展示完整字段。
-- 统计按 provider、模型 ID 和非敏感配置指纹隔离。
-- 统计数据按日聚合并保留最近 30 天，另保存少量近期结果状态；不保存完整请求/响应内容或 API key。
-- 不添加运行时第三方依赖。
+[![pi](https://img.shields.io/badge/pi-package-7c3aed?style=flat-square)](https://pi.dev/packages/pi-model-stats) [![npm](https://img.shields.io/npm/v/pi-model-stats?style=flat-square&color=blue)](https://www.npmjs.com/package/pi-model-stats) [![license](https://img.shields.io/badge/license-MIT-64748b?style=flat-square)](./LICENSE)
 
-`/model`、`Ctrl+L` 和 Pi 原生模型选择器不受影响。选择模型后通过公开 API `pi.setModel()` 切换当前 session 模型。
+![pi-model-stats 模型选择器](https://raw.githubusercontent.com/Ambiel127/pi-model-stats/main/assets/model-stats.png)
 
-## 使用
+*截图展示选择器界面；统计值来自本机实际观测的模型调用，无近 7 日数据时暂不显示。*
 
-要求 Pi `0.84.2` 及兼容的 Node.js 运行环境。可通过 npm 安装：
+## 安装
 
 ```bash
+# 单次试用（当次生效）
+pi -e npm:pi-model-stats
+
+# 长期安装（装完重启 Pi 或执行 /reload）
 pi install npm:pi-model-stats
 ```
 
-也可从源码目录显式加载扩展入口：
+## 功能
 
-```bash
-pi -e ./src/index.ts
-```
+- **被动采集** —— 只观察 provider 生命周期与 assistant 流事件，不发送探测请求，不改变请求参数或重试逻辑；仅统计扩展启用期间的调用，不回溯此前请求。
+- **统计选择器** —— `/model-stats` 或 `Ctrl+Alt+L` 打开模型选择器，有近 7 日数据的模型在行内展示统计。
+- **延迟与吞吐** —— `1d`/`7d` 成功数与有效请求数、首字延迟 `P50`/`P90`、`7d` `TPS`。
+- **自适应宽度** —— 窄终端按优先级从末尾丢弃字段，并追加 `· …` 标记；选中行在下方展示完整字段。
+- **隔离与保留** —— 按 provider、模型 ID 与非敏感配置指纹隔离；按日聚合，保留最近 30 天。
+- **隐私与轻量** —— 不保存请求/响应内容或 API key；无运行时第三方依赖。
 
-在交互式 TUI 中执行 `/model-stats` 或按 `Ctrl+Alt+L`。选择器支持搜索、上下移动、确认选择和取消；存在 scoped models 时可用 Tab 切换 all/scoped。模型目录会尝试刷新，刷新失败或超时则显示缓存模型。该选择器只支持 TUI 模式。
+选择器支持搜索、上下移动、确认与取消，打开时尝试刷新模型目录（15 秒超时），失败或超时则显示缓存模型。若配置了 scoped models（`/scoped-models` 的 `Ctrl+P` 轮换列表），可用 Tab 在 all/scoped 间切换，默认进入 scoped。仅 TUI 模式。
 
-## 数据采集与统计口径
+`/model`、`Ctrl+L` 和 Pi 原生模型选择器不受影响。选择后通过公开 API `pi.setModel()` 切换当前 session 模型。
 
-### 被动采集
+## 指标口径
 
-`src/collector.ts` 监听 provider headers/request/response、assistant `message_update`、`message_end` 和 session shutdown 等事件：
+- **1d / 7d** —— 本地日历日累计（`1d` 是 `7d` 的子集，非滚动窗口）。分子为成功数，分母为成功数加 provider 失败数；用户取消和请求被拒绝不计入分母。
+- **首字延迟 P50/P90** —— 请求开始到首个文本、思考或工具调用流事件，反映首个可见内容事件，不是网络层首字节计时。统计窗口同 `7d`。分位数由有界加权质心摘要（最多 300 个质心）计算，是**近似值**，精度随输入分布和跨日合并而变。
+- **7d TPS** —— 仅取成功请求中有正输出 token 且观测到正生成时长的样本，按总输出 token ÷ 总生成秒数计算，而非逐请求求平均。
 
-- 请求从可观察到的 provider 生命周期事件建立记录；同一逻辑请求的可观察重试不会简单地重复计为用户请求。
-- 首字延迟从请求开始到首个文本、思考或工具调用流事件计算。它反映首个可见内容事件，不是网络层首字节计时。
-- 成功、取消和错误由 stop reason、HTTP 状态及错误信息分类。错误分类用于聚合结果类别；原始请求及响应内容不写入统计文件。
+统计窗口按运行机器的**本地时区**切分。Pi 公开 API 不提供贯穿 provider 事件与 assistant 消息的稳定请求 ID，扩展只能按模型身份保守关联：无法唯一归属的流事件会跳过，统计可能漏记或错配，不保证覆盖每个请求。
 
-Pi 公共 API 不提供贯穿 provider 请求事件与 assistant 消息事件的稳定请求 ID，也没有物理 retry attempt ID。扩展只能根据模型身份和可观察到的事件进行保守关联：若同模型存在多个候选请求，无法唯一确定归属的流事件（包括首字延迟）会跳过；最终结果仍可能按模型匹配到待处理请求，因此并发请求的归属不保证准确。测试中的交错事件用例只验证模拟顺序下的行为，不证明真实运行时始终能正确关联。因此统计可能漏记或错配，不保证覆盖每个请求，也不保证等于底层物理 HTTP 尝试数。
+## 数据与隐私
 
-### 展示指标
-
-- **1d / 7d 成功数与有效请求数**：`1d` 为本地今日 00:00 至今的累计，`7d` 为含今日在内最近 7 个本地日历日（`1d` 是 `7d` 的子集）。两者都是日历日口径，不是滚动 24 小时 / 168 小时窗口。分子为成功请求；分母为成功数加 provider 失败数。用户主动取消和请求被拒绝不计入分母。
-- **首字 P50/P90**：统计窗口同 `7d`。对有首字延迟的观测值计算近似分位数；失败请求如果已经产生可见流事件，也可能贡献首字延迟。
-- **7d TPS**：统计窗口同 `7d`。仅累计成功请求中有正数输出 token usage、且观测到正生成时长的样本；按总输出 token 数除以总生成秒数计算，而不是对逐请求 TPS 求平均。历史数据没有相应字段时不会伪造 TPS。
-
-内联字段按 `1d`、`7d`、`P50`、`P90`、`TPS` 的顺序展示，同屏所有行使用相同字段数，并按各列最宽值补齐空格，使每一列都真正纵向对齐；放不下时从末尾丢弃并以 `…` 标记，选中行在下方展示完整字段（详情行不补齐）。模型名优先于统计得到完整宽度，但至少为统计保留 12 列。
-
-统计窗口按运行 Pi 的机器**本地时区**的日历日切分（非 UTC），因此 `1d` 的边界是本地午夜。跨时区旅行或迁移后，已有数据不会重算归属，最多影响边界当天，30 天保留期后自然淘汰；在 `TZ=UTC` 的容器内运行时「本地」就是 UTC，需在部署侧设置 `TZ`。模型身份的配置指纹包括 API、规范化 base URL、兼容设置、采样参数、思考等级映射及筛选后的路由 header；敏感字段会从指纹输入中排除。
-
-## 分位数摘要
-
-`src/digest.ts` 实现无外部依赖、受 t-digest 启发的加权质心摘要。每个质心保存代表值和样本数；根据质心在分布中的位置限制可合并容量，让两端保留更多细节；超过上限时压缩，最多保留 300 个质心。每日写入摘要，查询跨日指标时合并每日摘要后计算分位数。
-
-P50/P90 是近似值，精度受输入分布和摘要合并影响。验收测试以精确分位值为基准：P50、P90 的绝对误差应不超过 `max(10 ms, 精确分位值 × 5%)`。测试覆盖连续、偏斜/长尾、双峰、重复值、不同写入顺序及分日摘要合并等合成场景，并同时检查样本数、分位单调性和摘要上限。该标准是这些测试场景的验收目标，不构成对任意生产数据分布的数学保证；300 个质心是单日存储上限，不代表误差阈值。
-
-## 文件与隐私
-
-默认情况下，运行时数据写入 Pi agent 全局目录：
+不保存完整请求/响应内容或 API key。统计数据默认写入 Pi agent 全局目录，可用 `PI_MODEL_STATS_DIR` 覆盖：
 
 ```text
 ~/.pi/agent/model-stats/data.json
 ~/.pi/agent/model-stats/error.log
 ```
 
-可通过 `PI_MODEL_STATS_DIR` 单独覆盖 model-stats 数据目录；未设置时仍使用 Pi agent 全局目录。
+数据按日聚合并保留最近 30 天。扩展不提供清空统计的命令；需要重置时直接删除 `data.json`。
 
-`data.json` 使用 schema v4：按模型身份分桶，记录 30 日以内每天的结果类别计数、首字延迟摘要和可计算 TPS 的聚合值，并保存少量近期结果状态。旧 schema v1/v2/v3 会在读取时迁移。数据通过临时文件原子替换，并用目录锁协调并发写入；无法解析的数据会备份为 `data.json.corrupt-<时间戳>`，最多保留 5 个损坏备份。
+`error.log`（约 1 MB 上限）仅记录存储诊断，不是通用异常日志；内容可能包含异常堆栈和本机路径，使用或分享前请先检查并按需脱敏。
 
-`error.log`（最大约 1 MB）仅记录统计数据损坏恢复、存储初始化失败和统计写入失败等存储诊断，不是通用扩展运行时异常日志。统计文件不保存请求错误消息；诊断日志可能包含异常文本，使用或分享前请先检查并按需脱敏。
+实现细节：`data.json` 使用 schema v4，按模型身份分桶记录结果计数、首字延迟摘要与 TPS 聚合，并保存少量近期结果状态（最近 20 条结果标记、连续失败次数、最近成功/失败时间；当前版本仅存储不展示）。数据通过临时文件原子替换，并用目录锁协调并发；无法解析时备份为 `data.json.corrupt-<时间戳>`，最多保留 5 个损坏备份。
 
-## 项目结构
-
-```text
-src/index.ts          扩展注册、命令和快捷键
-src/collector.ts      provider/assistant 生命周期被动采集
-src/metrics.ts        错误分类、统计汇总、指标格式化
-src/digest.ts         有界分位数摘要、合并、序列化与恢复
-src/identity.ts       模型身份及配置指纹
-src/config.ts         全局数据路径
-src/storage.ts        数据校验、迁移、锁、原子持久化与保留策略
-src/model-picker.ts   带统计后缀的模型选择器
-src/types.ts          数据与指标类型
-test/                 Vitest 测试
-```
-
-Pi `0.84.2` 的公开扩展 API 不提供原生模型选择器行装饰扩展点或默认模型持久化方法，因此本扩展使用自定义选择器，选择后切换当前 session 模型。扩展也不使用私有 API 或主动测活请求。
-
-## 开发与验证
-
-项目 `.pi/extensions/model-stats/` 加载本地源码；该项目入口会在加载源码前将统计数据目录设为 `.pi/agent/model-stats/`，因此任何加载项目扩展的 Pi 进程（包括已启动的开发环境）都会使用项目数据。`.pi/settings.json` 会在本项目中禁用 npm 安装版 `pi-model-stats`，避免同一扩展重复加载，同时保留用户级其他插件。启动开发环境时运行项目根目录的 `dev.cmd`（Nushell：`^./dev.cmd`；CMD：`dev.cmd`）；它只负责切换到项目目录并启动 Pi。参数会原样传给 Pi；例如 `dev.cmd -r`（`--resume`）会打开交互式会话选择器，`dev.cmd --continue` 会继续最近会话。直接使用 npm 安装版时仍使用全局数据目录。
+## 更新
 
 ```bash
-npm install
-npm run validate  # TypeScript、ESLint、Vitest 全量检查
-npm test          # 仅运行测试
-npm run lint      # 仅运行静态检查
+pi update npm:pi-model-stats
 ```
 
-Smoke check（只验证加载，不发送模型请求）：
+## 贡献
 
-```bash
-pi --no-extensions -e ./src/index.ts --offline --list-models "cpa/gpt"
-```
+欢迎提交 Issue 和 Pull Request。
 
+## 许可
+
+[MIT](./LICENSE) © 2026 matianhao
